@@ -3,17 +3,16 @@ import datetime
 import hashlib
 import hmac
 import json
-import logging
 import uuid
 from typing import Optional
 
 import aiohttp
 
+from astrbot.api import logger
+
 from ..models import message
 from ..models import open_live as open_models
 from . import ws_base
-
-logger = logging.getLogger("blivedm")
 
 START_URL = "https://live-open.biliapi.com/v2/app/start"
 HEARTBEAT_URL = "https://live-open.biliapi.com/v2/app/heartbeat"

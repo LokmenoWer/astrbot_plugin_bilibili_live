@@ -1,14 +1,13 @@
 import asyncio
-import logging
-from typing import Optional, Any
+from typing import Any, Optional
 
 import aiohttp
+
+from astrbot.api import logger
 
 from ..models import message
 from ..models import web as web_models
 from . import ws_base
-
-logger = logging.getLogger("blivedm")
 
 UID_INIT_URL = "https://api.bilibili.com/x/web-interface/nav"
 BUVID_INIT_URL = "https://www.bilibili.com/"

@@ -1,7 +1,6 @@
 import asyncio
 import enum
 import json
-import logging
 import struct
 import zlib
 from typing import AsyncIterator, NamedTuple, Optional
@@ -9,9 +8,9 @@ from typing import AsyncIterator, NamedTuple, Optional
 import aiohttp
 import brotli
 
-from ..models import message
+from astrbot.api import logger
 
-logger = logging.getLogger("blivedm")
+from ..models import message
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36"
 
