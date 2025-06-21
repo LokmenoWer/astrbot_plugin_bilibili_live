@@ -8,6 +8,56 @@ from astrbot.api import logger
 from ..models import message
 from ..models import web as web_models
 from . import ws_base
+import time
+import urllib.parse
+from functools import reduce
+from hashlib import md5
+
+# 硬编码的 mixinKeyEncTab
+MIXIN_KEY_ENC_TAB = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52
+]
+NAV_URL = 'https://api.bilibili.com/x/web-interface/nav'
+
+def _get_mixin_key(orig: str):
+    """对 imgKey 和 subKey 进行字符顺序打乱编码"""
+    return reduce(lambda s, i: s + orig[i], MIXIN_KEY_ENC_TAB, '')[:32]
+
+async def _get_wbi_keys_async(session) -> tuple[str, str]:
+    """获取最新的 img_key 和 sub_key (异步版本)"""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
+        'Referer': 'https://www.bilibili.com/'
+    }
+    async with session.get(NAV_URL, headers=headers) as resp:
+        resp.raise_for_status()
+        json_content = await resp.json()
+
+    img_url: str = json_content['data']['wbi_img']['img_url']
+    sub_url: str = json_content['data']['wbi_img']['sub_url']
+    img_key = img_url.rsplit('/', 1)[1].split('.')[0]
+    sub_key = sub_url.rsplit('/', 1)[1].split('.')[0]
+    return img_key, sub_key
+
+async def _enc_wbi_async(session, params: dict):
+    """为请求参数进行 wbi 签名 (异步版本)"""
+    img_key, sub_key = await _get_wbi_keys_async(session)
+    mixin_key = _get_mixin_key(img_key + sub_key)
+    curr_time = round(time.time())
+    params['wts'] = curr_time                                   # 添加 wts 字段
+    params = dict(sorted(params.items()))                       # 按照 key 重排参数
+    # 过滤 value 中的 "!'()*" 字符
+    params = {
+        k: ''.join(filter(lambda char: char not in "!'()*", str(v)))
+        for k, v in params.items()
+    }
+    query = urllib.parse.urlencode(params)                      # 序列化参数
+    wbi_sign = md5((query + mixin_key).encode()).hexdigest()     # 计算 w_rid
+    params['w_rid'] = wbi_sign
+    return params
 
 UID_INIT_URL = "https://api.bilibili.com/x/web-interface/nav"
 BUVID_INIT_URL = "https://www.bilibili.com/"
@@ -235,18 +285,31 @@ class WebClient(ws_base.WebSocketClientBase):
         return True
 
     async def _init_host_server(self):
+        # 原始参数
+        params = {"id": self._room_id, "type": 0}
+
+        # 使用WBI签名
+        try:
+            signed_params = await _enc_wbi_async(self._session, params)
+        except Exception as e:
+            logger.warning(
+                f"room={self._room_id} WBI signing failed, error={e}. Falling back to original params.",
+            )
+            # 如果签名失败，仍然尝试使用原始参数（可能会失败，但提供了兼容性）
+            signed_params = params
+
+        # 使用签名后的参数进行请求
         success, data = await self._api_request(
-            "GET", DANMAKU_SERVER_CONF_URL, params={"id": self._room_id, "type": 0}
+            "GET", DANMAKU_SERVER_CONF_URL, params=signed_params
         )
 
         if not success or not data:
             return False
 
-        if data["code"] != 0:
+        # 有时返回的 message 是数字错误码，有时是字符串。
+        if data.get("code", -1) != 0:
             logger.warning(
-                "room=%d _init_host_server() failed, message=%s",
-                self._room_id,
-                data["message"],
+                f"room={self._room_id} _init_host_server() failed, code={data.get('code')}, message={data.get('message', 'N/A')}",
             )
             return False
 
