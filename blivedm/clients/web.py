@@ -1,5 +1,8 @@
 import asyncio
-from typing import Any, Optional
+import datetime
+import hashlib
+import weakref
+from typing import Any, Optional, Awaitable
 
 import aiohttp
 
@@ -8,67 +11,15 @@ from astrbot.api import logger
 from ..models import message
 from ..models import web as web_models
 from . import ws_base
-import time
-import urllib.parse
-from functools import reduce
-from hashlib import md5
 
-# 硬编码的 mixinKeyEncTab
-MIXIN_KEY_ENC_TAB = [
-    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
-    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
-    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
-    36, 20, 34, 44, 52
-]
+
 NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
-
-
-def _get_mixin_key(orig: str):
-    """对 imgKey 和 subKey 进行字符顺序打乱编码"""
-    return reduce(lambda s, i: s + orig[i], MIXIN_KEY_ENC_TAB, "")[:32]
-
-
-async def _get_wbi_keys_async(session) -> tuple[str, str]:
-    """获取最新的 img_key 和 sub_key (异步版本)"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-        "Referer": "https://www.bilibili.com/",
-    }
-    async with session.get(NAV_URL, headers=headers) as resp:
-        resp.raise_for_status()
-        json_content = await resp.json()
-
-    img_url: str = json_content["data"]["wbi_img"]["img_url"]
-    sub_url: str = json_content["data"]["wbi_img"]["sub_url"]
-    img_key = img_url.rsplit("/", 1)[1].split(".")[0]
-    sub_key = sub_url.rsplit("/", 1)[1].split(".")[0]
-    return img_key, sub_key
-
-
-async def _enc_wbi_async(session, params: dict):
-    """为请求参数进行 wbi 签名 (异步版本)"""
-    img_key, sub_key = await _get_wbi_keys_async(session)
-    mixin_key = _get_mixin_key(img_key + sub_key)
-    curr_time = round(time.time())
-    params["wts"] = curr_time  # 添加 wts 字段
-    params = dict(sorted(params.items()))  # 按照 key 重排参数
-    # 过滤 value 中的 "!'()*" 字符
-    params = {
-        k: "".join(filter(lambda char: char not in "!'()*", str(v)))
-        for k, v in params.items()
-    }
-    query = urllib.parse.urlencode(params)  # 序列化参数
-    wbi_sign = md5((query + mixin_key).encode()).hexdigest()  # 计算 w_rid
-    params["w_rid"] = wbi_sign
-    return params
-
-
+WBI_INIT_URL = NAV_URL
 UID_INIT_URL = "https://api.bilibili.com/x/web-interface/nav"
 BUVID_INIT_URL = "https://www.bilibili.com/"
 ROOM_INIT_URL = "https://api.live.bilibili.com/room/v1/Room/get_info"
-DANMAKU_SERVER_CONF_URL = (
-    "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo"
-)
+DANMAKU_SERVER_CONF_URL = "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo"
+
 DEFAULT_DANMAKU_SERVER_LIST = [
     {
         "host": "broadcastlv.chat.bilibili.com",
@@ -77,7 +28,168 @@ DEFAULT_DANMAKU_SERVER_LIST = [
         "ws_port": 2244,
     }
 ]
+
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/102.0.0.0 Safari/537.36"
+
+
+_session_to_wbi_signer = weakref.WeakKeyDictionary()
+
+
+def _get_wbi_signer(session: aiohttp.ClientSession) -> "_WbiSigner":
+    wbi_signer = _session_to_wbi_signer.get(session, None)
+    if wbi_signer is None:
+        wbi_signer = _session_to_wbi_signer[session] = _WbiSigner(session)
+    return wbi_signer
+
+
+class _WbiSigner:
+    """WBI签名器，用于对请求参数进行签名"""
+
+    WBI_KEY_INDEX_TABLE = [
+        46,
+        47,
+        18,
+        2,
+        53,
+        8,
+        23,
+        32,
+        15,
+        50,
+        10,
+        31,
+        58,
+        3,
+        45,
+        35,
+        27,
+        43,
+        5,
+        49,
+        33,
+        9,
+        42,
+        19,
+        29,
+        28,
+        14,
+        39,
+        12,
+        38,
+        41,
+        13,
+    ]
+    """wbi密码表"""
+
+    WBI_KEY_TTL = datetime.timedelta(hours=11, minutes=59, seconds=30)
+    """WBI密钥有效期"""
+
+    def __init__(self, session: aiohttp.ClientSession):
+        self._session = session
+        self._wbi_key = ""
+        """缓存的wbi鉴权口令"""
+        self._refresh_future: Optional[Awaitable] = None
+        """用来避免同时刷新"""
+        self._last_refresh_time: Optional[datetime.datetime] = None
+
+    @property
+    def wbi_key(self):
+        """缓存的wbi鉴权口令"""
+        return self._wbi_key
+
+    def reset(self):
+        """重置WBI密钥缓存"""
+        self._wbi_key = ""
+        self._last_refresh_time = None
+
+    @property
+    def need_refresh_wbi_key(self):
+        """检查是否需要刷新WBI密钥"""
+        return self._wbi_key == "" or (
+                self._last_refresh_time is not None
+                and datetime.datetime.now() - self._last_refresh_time >= self.WBI_KEY_TTL
+        )
+
+    def refresh_wbi_key(self) -> Awaitable:
+        """刷新WBI密钥"""
+        if self._refresh_future is None:
+            self._refresh_future = asyncio.create_task(self._do_refresh_wbi_key())
+
+            def on_done(_fu):
+                self._refresh_future = None
+            self._refresh_future.add_done_callback(on_done)
+
+        return self._refresh_future
+
+    async def _do_refresh_wbi_key(self):
+        """执行WBI密钥刷新"""
+        wbi_key = await self._get_wbi_key()
+        if wbi_key == "":
+            return
+
+        self._wbi_key = wbi_key
+        self._last_refresh_time = datetime.datetime.now()
+
+    async def _get_wbi_key(self):
+        """获取WBI密钥"""
+        try:
+            async with self._session.get(
+                    WBI_INIT_URL,
+                    headers={"User-Agent": USER_AGENT},
+            ) as res:
+                if res.status != 200:
+                    logger.warning("WbiSigner failed to get wbi key: status=%d %s", res.status, res.reason)
+                    return ""
+                data = await res.json()
+        except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+            logger.exception("WbiSigner failed to get wbi key:")
+            return ""
+
+        try:
+            wbi_img = data["data"]["wbi_img"]
+            img_key = wbi_img["img_url"].rpartition("/")[2].partition(".")[0]
+            sub_key = wbi_img["sub_url"].rpartition("/")[2].partition(".")[0]
+        except KeyError:
+            logger.warning("WbiSigner failed to get wbi key: data=%s", data)
+            return ""
+
+        shuffled_key = img_key + sub_key
+        wbi_key = []
+        for index in self.WBI_KEY_INDEX_TABLE:
+            if index < len(shuffled_key):
+                wbi_key.append(shuffled_key[index])
+        return "".join(wbi_key)
+
+    def add_wbi_sign(self, params: dict):
+        """为请求参数添加WBI签名"""
+        if self._wbi_key == "":
+            return params
+
+        wts = str(int(datetime.datetime.now().timestamp()))
+        params_to_sign = {**params, "wts": wts}
+
+        # 按key字典序排序
+        params_to_sign = {
+            key: params_to_sign[key]
+            for key in sorted(params_to_sign.keys())
+        }
+        # 过滤一些字符
+        for key, value in params_to_sign.items():
+            value = "".join(
+                ch
+                for ch in str(value)
+                if ch not in "!'()*"
+            )
+            params_to_sign[key] = value
+
+        import urllib.parse
+        str_to_sign = urllib.parse.urlencode(params_to_sign) + self._wbi_key
+        w_rid = hashlib.md5(str_to_sign.encode("utf-8")).hexdigest()
+        return {
+            **params,
+            "wts": wts,
+            "w_rid": w_rid
+        }
 
 
 class WebClient(ws_base.WebSocketClientBase):
@@ -92,13 +204,13 @@ class WebClient(ws_base.WebSocketClientBase):
     """
 
     def __init__(
-        self,
-        room_id: int,
-        *,
-        uid: Optional[int] = None,
-        session: Optional[aiohttp.ClientSession] = None,
-        heartbeat_interval=30,
-        cookie_str: Optional[str] = None,
+            self,
+            room_id: int,
+            *,
+            uid: Optional[int] = None,
+            session: Optional[aiohttp.ClientSession] = None,
+            heartbeat_interval=30,
+            cookie_str: Optional[str] = None,
     ):
         super().__init__(session, heartbeat_interval)
 
@@ -205,6 +317,7 @@ class WebClient(ws_base.WebSocketClientBase):
         return result
 
     async def _init_uid(self):
+        """初始化用户ID"""
         # 检查是否手动指定了SESSDATA cookie
         if "SESSDATA" not in self._cookies or not self._cookies["SESSDATA"]:
             return False
@@ -235,17 +348,18 @@ class WebClient(ws_base.WebSocketClientBase):
             return False
 
     def _get_buvid(self):
+        """获取buvid"""
         if "buvid3" in self._cookies:
             return self._cookies["buvid3"]
         return ""
 
     async def _api_request(
-        self, method: str, url: str, params: dict = None
+            self, method: str, url: str, params: dict = None
     ) -> tuple[bool, Any]:
         """统一处理API请求"""
         try:
             async with self._session.request(
-                method, url, headers={"User-Agent": USER_AGENT}, params=params
+                    method, url, headers={"User-Agent": USER_AGENT}, params=params
             ) as res:
                 if res.status != 200:
                     logger.warning(
@@ -266,6 +380,7 @@ class WebClient(ws_base.WebSocketClientBase):
             return False, None
 
     async def _init_room_id_and_owner(self):
+        """初始化房间ID和主播信息"""
         success, data = await self._api_request(
             "GET", ROOM_INIT_URL, params={"room_id": self._tmp_room_id}
         )
@@ -284,17 +399,26 @@ class WebClient(ws_base.WebSocketClientBase):
         return self._parse_room_init(data["data"])
 
     def _parse_room_init(self, data):
+        """解析房间初始化数据"""
         self._room_id = data["room_id"]
         self._room_owner_uid = data["uid"]
         return True
 
     async def _init_host_server(self):
+        """初始化弹幕服务器信息"""
+        # 获取WBI签名器
+        wbi_signer = _get_wbi_signer(self._session)
+
+        # 检查是否需要刷新WBI密钥
+        if wbi_signer.need_refresh_wbi_key:
+            await wbi_signer.refresh_wbi_key()
+
         # 原始参数
         params = {"id": self._room_id, "type": 0}
 
         # 使用WBI签名
         try:
-            signed_params = await _enc_wbi_async(self._session, params)
+            signed_params = wbi_signer.add_wbi_sign(params)
         except Exception as e:
             logger.warning(
                 f"room={self._room_id} WBI signing failed, error={e}. Falling back to original params.",
@@ -320,6 +444,7 @@ class WebClient(ws_base.WebSocketClientBase):
         return self._parse_danmaku_server_conf(data["data"])
 
     def _parse_danmaku_server_conf(self, data):
+        """解析弹幕服务器配置"""
         self._host_server_list = data["host_list"]
         self._host_server_token = data["token"]
         if not self._host_server_list:
