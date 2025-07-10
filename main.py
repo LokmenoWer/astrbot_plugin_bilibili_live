@@ -13,7 +13,7 @@ from .blivedm.models import message as bili_msg
 from .context_rec import ContextRecord
 
 
-@register("astrbot_plugin_bilibili_live", "Raven95676", "接入Bilibili直播", "0.2.0")
+@register("astrbot_plugin_bilibili_live", "Raven95676", "接入Bilibili直播", "0.2.1")
 class BilibiliLive(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
