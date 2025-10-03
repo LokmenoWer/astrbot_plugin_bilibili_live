@@ -77,23 +77,78 @@ class BilibiliLive(Star):
 
         sender = self._get_sender_id(message)
 
+        # if (
+        #     isinstance(message, bili_msg.DanmakuMessage)
+        #     and "danmaku" in self.allow_message_type
+        # ):
+        #     await self._send_message(
+        #         sender=sender,
+        #         sender_name=message.user_name,
+        #         message=f"[弹幕] {message.user_name}({message.user_id})说: {message.content}",
+        #     )
+        # elif (
+        #     isinstance(message, bili_msg.GiftMessage)
+        #     and "gift" in self.allow_message_type
+        # ):
+        #     await self._send_message(
+        #         sender=sender,
+        #         sender_name=message.user_name,
+        #         message=f"[礼物] {message.user_name}({message.user_id})赠送了{message.gift_num}个{message.gift_name}",
+        #     )
+        # elif (
+        #     isinstance(message, bili_msg.SuperChatMessage)
+        #     and "super_chat" in self.allow_message_type
+        # ):
+        #     await self._send_message(
+        #         sender=sender,
+        #         sender_name=message.user_name,
+        #         message=f"[醒目留言] {message.user_name}({message.user_id})说: {message.message}",
+        #     )
+        # elif (
+        #     isinstance(message, bili_msg.LikeMessage)
+        #     and "like" in self.allow_message_type
+        # ):
+        #     await self._send_message(
+        #         sender=sender,
+        #         sender_name=message.user_name,
+        #         message=f"[点赞] {message.user_name}({message.user_id})点赞了",
+        #     )
+        # elif (
+        #     isinstance(message, bili_msg.EnterRoomMessage)
+        #     and "enter_room" in self.allow_message_type
+        # ):
+        #     await self._send_message(
+        #         sender=sender,
+        #         sender_name=message.user_name,
+        #         message=f"[进入直播间] {message.user_name}({message.user_id})进入了直播间",
+        #     )
+        # elif (
+        #     isinstance(message, bili_msg.GuardBuyMessage)
+        #     and "guard_buy" in self.allow_message_type
+        # ):
+        #     guard_level_names = {1: "总督", 2: "提督", 3: "舰长"}
+        #     guard_level_name = guard_level_names.get(message.guard_level, "未知")
+        #     await self._send_message(
+        #         sender=sender,
+        #         sender_name=message.user_name,
+        #         message=f"[上舰] {message.user_name}({message.user_id})成为了{guard_level_name}",
+        #     )
         if (
-            isinstance(message, bili_msg.DanmakuMessage)
-            and "danmaku" in self.allow_message_type
-        ):
-            await self._send_message(
-                sender=sender,
-                sender_name=message.user_name,
-                message=f"[弹幕] {message.user_name}({message.user_id})说: {message.content}",
-            )
-        elif (
             isinstance(message, bili_msg.GiftMessage)
             and "gift" in self.allow_message_type
         ):
+            # 判断礼物价值
+            gift_min_value = 5
+            total_value = message.gift_num * message.price / 1000
+            if total_value < gift_min_value:
+                logger.debug(
+                    f"礼物价值 {total_value} 小于最小值 {gift_min_value}，跳过处理"
+                )
+                return
             await self._send_message(
                 sender=sender,
                 sender_name=message.user_name,
-                message=f"[礼物] {message.user_name}({message.user_id})赠送了{message.gift_num}个{message.gift_name}",
+                message=f"{message.user_name}赠送了\n{message.gift_num}个{message.gift_name}",
             )
         elif (
             isinstance(message, bili_msg.SuperChatMessage)
@@ -105,26 +160,8 @@ class BilibiliLive(Star):
                 message=f"[醒目留言] {message.user_name}({message.user_id})说: {message.message}",
             )
         elif (
-            isinstance(message, bili_msg.LikeMessage)
-            and "like" in self.allow_message_type
-        ):
-            await self._send_message(
-                sender=sender,
-                sender_name=message.user_name,
-                message=f"[点赞] {message.user_name}({message.user_id})点赞了",
-            )
-        elif (
-            isinstance(message, bili_msg.EnterRoomMessage)
-            and "enter_room" in self.allow_message_type
-        ):
-            await self._send_message(
-                sender=sender,
-                sender_name=message.user_name,
-                message=f"[进入直播间] {message.user_name}({message.user_id})进入了直播间",
-            )
-        elif (
             isinstance(message, bili_msg.GuardBuyMessage)
-            and "guard_buy" in self.allow_message_type
+             and "guard_buy" in self.allow_message_type
         ):
             guard_level_names = {1: "总督", 2: "提督", 3: "舰长"}
             guard_level_name = guard_level_names.get(message.guard_level, "未知")
@@ -133,6 +170,7 @@ class BilibiliLive(Star):
                 sender_name=message.user_name,
                 message=f"[上舰] {message.user_name}({message.user_id})成为了{guard_level_name}",
             )
+
 
     async def _send_llm_message(self, sender: str, message: str):
         """处理LLM聊天并更新上下文"""
